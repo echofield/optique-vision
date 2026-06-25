@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef } from "react";
 import * as D from "./data";
-import { subscribeNotifications } from "./api";
+import { fetchNotifications, fetchRelances, fetchArrivals, dbSendRelance, dbSendAllDue, dbResolveArrival, dbInsertNotif, dbMarkRead, dbMarkAllRead, dbDismiss, subscribeNotifications } from "./api";
 
 // ── design tokens ─────────────────────────────────────────────
 const T = {
@@ -59,9 +59,9 @@ export default function OptiqueOS() {
   const [stockCat, setStockCat] = useState("all");
   const [queueTab, setQueueTab] = useState("overdue");
   const [relTab, setRelTab] = useState("all");
-  const [sentRel, setSentRel] = useState({});
+  const [relances, setRelances] = useState(() => D.RELANCES.map((r) => ({ ...r })));
   const [openRel, setOpenRel] = useState(null);
-  const [resolved, setResolved] = useState({});
+  const [arrivals, setArrivals] = useState(() => D.ARRIVALS.map((a) => ({ ...a })));
   const [matchingId, setMatchingId] = useState(null);
   const [proposed, setProposed] = useState({});
   const [formHire, setFormHire] = useState("lea");
@@ -83,19 +83,30 @@ export default function OptiqueOS() {
   const inBf = (bid) => boutiqueFilter === "all" || boutiqueFilter === bid;
 
   const unread = notifs.filter((n) => !n.read && !n.dismissed).length;
-  function markRead(id) { setNotifs((l) => l.map((n) => (n.id === id ? { ...n, read: true } : n))); }
-  function markAllRead() { setNotifs((l) => l.map((n) => ({ ...n, read: true }))); }
-  function dismissNotif(id) { setNotifs((l) => l.map((n) => (n.id === id ? { ...n, dismissed: true } : n))); }
+  function markRead(id) { setNotifs((l) => l.map((n) => (n.id === id ? { ...n, read: true } : n))); dbMarkRead(id); }
+  function markAllRead() { setNotifs((l) => l.map((n) => ({ ...n, read: true }))); dbMarkAllRead(); }
+  function dismissNotif(id) { setNotifs((l) => l.map((n) => (n.id === id ? { ...n, dismissed: true } : n))); dbDismiss(id); }
   function openNotifTarget(n) {
     markRead(n.id); setNotifOpen(false);
     const a = n.action || {};
     if (a.screen === "profile") openClient(a.client || n.client || "gabriel");
     else { if (a.relTab) setRelTab(a.relTab); go(a.screen || "dashboard"); }
   }
-  // real-time push stub — wire identical to production
+  // initial load + live notifications (Supabase when configured, else seed)
   useEffect(() => {
-    const unsub = subscribeNotifications((n) => setNotifs((l) => [{ ...n }, ...l]));
-    return unsub;
+    let alive = true;
+    fetchNotifications().then((rows) => alive && rows && setNotifs(rows));
+    fetchRelances().then((rows) => alive && rows && setRelances(rows));
+    fetchArrivals().then((rows) => alive && rows && setArrivals(rows));
+    const unsub = subscribeNotifications(({ kind, row }) => {
+      if (!row) return;
+      setNotifs((l) => {
+        if (kind === "DELETE") return l.filter((n) => n.id !== row.id);
+        if (l.some((n) => n.id === row.id)) return l.map((n) => (n.id === row.id ? { ...n, ...row } : n));
+        return [row, ...l];
+      });
+    });
+    return () => { alive = false; unsub(); };
   }, []);
 
   function openClient(id) {
@@ -106,27 +117,32 @@ export default function OptiqueOS() {
   function go(s) { setScreen(s); if (typeof window !== "undefined") window.scrollTo(0, 0); }
 
   function sendRel(id) {
-    setSentRel((s) => ({ ...s, [id]: true }));
-    const r = D.RELANCES.find((x) => x.id === id);
+    const r = relances.find((x) => x.id === id);
     if (!r) return;
+    setRelances((l) => l.map((x) => (x.id === id ? { ...x, sent: true } : x)));
+    dbSendRelance(id);
     const c = clientMap[r.client] || {};
-    setNotifs((l) => {
-      // any matching unread "todo" for this client+type should stop nagging
-      const next = l.map((n) => (!n.read && n.client === r.client && n.type === r.type ? { ...n, read: true } : n));
-      return [{ id: "rs-" + id + "-" + Date.now(), type: "relance-sent", day: "today", time: "À l'instant", read: true, client: r.client, title: `Relance envoyée · ${c.name || r.client}`, detail: `${D.REL_TYPES[r.type].label} — ${r.channel}`, action: null }, ...next];
-    });
+    // any matching unread "todo" for this client+type should stop nagging
+    notifs.filter((n) => !n.read && n.client === r.client && n.type === r.type).forEach((n) => dbMarkRead(n.id));
+    const note = { id: "rs-" + id + "-" + Date.now(), type: "relance-sent", day: "today", time: "À l'instant", read: true, client: r.client, title: `Relance envoyée · ${c.name || r.client}`, detail: `${D.REL_TYPES[r.type].label} — ${r.channel}`, action: null };
+    setNotifs((l) => [note, ...l.map((n) => (!n.read && n.client === r.client && n.type === r.type ? { ...n, read: true } : n))]);
+    dbInsertNotif(note);
   }
   function sendAllDue() {
-    setSentRel((s) => { const n = { ...s }; D.RELANCES.forEach((r) => { if (r.when === "Aujourd'hui") n[r.id] = true; }); return n; });
+    setRelances((l) => l.map((x) => (x.when === "Aujourd'hui" ? { ...x, sent: true } : x)));
+    dbSendAllDue();
+    notifs.filter((n) => !n.read && (n.type === "mutuelle" || n.type === "commande")).forEach((n) => dbMarkRead(n.id));
     setNotifs((l) => l.map((n) => (!n.read && (n.type === "mutuelle" || n.type === "commande") ? { ...n, read: true } : n)));
   }
   function resolveArrival(aid, cid) {
     const c = clientMap[cid]; const name = (c && c.name) || "Client";
-    setResolved((s) => ({ ...s, [aid]: name })); setMatchingId(null);
-    setNotifs((l) => {
-      const next = l.map((n) => (!n.read && n.type === "arrivage" ? { ...n, read: true } : n));
-      return [{ id: "am-" + aid + "-" + Date.now(), type: "arrivage-matched", day: "today", time: "À l'instant", read: true, client: cid, title: `Commande prête · ${name}`, detail: "Arrivage rapproché — SMS « commande prête » prêt à partir", action: { label: "Programmer la relance", screen: "relances", relTab: "commande" } }, ...next];
-    });
+    setArrivals((l) => l.map((a) => (a.id === aid ? { ...a, matched_client: cid, resolved: true } : a)));
+    setMatchingId(null);
+    dbResolveArrival(aid, cid);
+    notifs.filter((n) => !n.read && n.type === "arrivage").forEach((n) => dbMarkRead(n.id));
+    const note = { id: "am-" + aid + "-" + Date.now(), type: "arrivage-matched", day: "today", time: "À l'instant", read: true, client: cid, title: `Commande prête · ${name}`, detail: "Arrivage rapproché — SMS « commande prête » prêt à partir", action: { label: "Programmer la relance", screen: "relances", relTab: "commande" } };
+    setNotifs((l) => [note, ...l.map((n) => (!n.read && n.type === "arrivage" ? { ...n, read: true } : n))]);
+    dbInsertNotif(note);
   }
 
   // report generation (timed reveal)
@@ -396,9 +412,9 @@ export default function OptiqueOS() {
       { id: "commande", label: "Commandes" },
       { id: "impaye", label: "Impayés" },
     ];
-    const count = (id) => (id === "all" ? D.RELANCES.length : D.RELANCES.filter((r) => r.type === id).length);
-    const dueToday = D.RELANCES.filter((r) => r.when === "Aujourd'hui");
-    const list = D.RELANCES.filter((r) => relTab === "all" || r.type === relTab);
+    const count = (id) => (id === "all" ? relances.length : relances.filter((r) => r.type === id).length);
+    const dueToday = relances.filter((r) => r.when === "Aujourd'hui");
+    const list = relances.filter((r) => relTab === "all" || r.type === relTab);
 
     return (
       <>
@@ -408,7 +424,7 @@ export default function OptiqueOS() {
 
         <div className="oq-4" style={{ marginBottom: 18 }}>
           <StatTile label="Prêtes aujourd'hui" value={String(dueToday.length)} sub="programmées à 9:00" subColor={T.alert} />
-          <StatTile label="Cette semaine" value={String(D.RELANCES.length)} sub="déclencheurs actifs" subColor={T.text3} />
+          <StatTile label="Cette semaine" value={String(relances.length)} sub="déclencheurs actifs" subColor={T.text3} />
           <StatTile label="Impayés suivis" value="1" sub="relance organisme auto" subColor={T.text3} />
           <StatTile label="Envoyées 30 j" value="64" sub="94 % sans intervention" subColor={T.green2} />
         </div>
@@ -432,7 +448,7 @@ export default function OptiqueOS() {
           {list.map((r) => {
             const rt = D.REL_TYPES[r.type];
             const c = clientMap[r.client] || {};
-            const sent = !!sentRel[r.id];
+            const sent = !!r.sent;
             const open = openRel === r.id;
             const isWa = r.channel === "WhatsApp";
             return (
@@ -477,9 +493,9 @@ export default function OptiqueOS() {
 
         <SectionTitle>Colis du jour</SectionTitle>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 30 }}>
-          {D.ARRIVALS.map((a) => {
-            const matchedName = resolved[a.id] || (a.client ? (clientMap[a.client] || {}).name : null);
-            const isOrphan = !a.client && !resolved[a.id];
+          {arrivals.map((a) => {
+            const matchedName = a.matched_client ? (clientMap[a.matched_client] || {}).name : (a.client ? (clientMap[a.client] || {}).name : null);
+            const isOrphan = !a.client && !a.matched_client;
             return (
               <div key={a.id} style={{ background: T.card, border: `1px solid ${isOrphan ? "#e4cfa0" : T.border}`, borderLeft: `3px solid ${isOrphan ? T.gold : T.green2}`, borderRadius: 16, padding: 18 }}>
                 <div style={{ display: "flex", gap: 14, justifyContent: "space-between", flexWrap: "wrap" }}>
