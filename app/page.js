@@ -71,6 +71,7 @@ export default function OptiqueOS() {
   // profile report + audio
   const [genState, setGenState] = useState("idle");
   const [visibleParas, setVisibleParas] = useState(0);
+  const [report, setReport] = useState(D.REPORT);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [audioHover, setAudioHover] = useState(null);
@@ -146,18 +147,30 @@ export default function OptiqueOS() {
   }
 
   // report generation (timed reveal)
-  function generate() {
+  async function generate() {
     if (genState === "loading") return;
+    const surname = cur.name.split(" ").slice(-1)[0];
+    const fallback = D.REPORT.map((t, i) => (i === 0 ? "Bonjour Monsieur " + surname + "," : t));
     setGenState("loading"); setVisibleParas(0);
-    clearTimeout(genRef.current);
-    genRef.current = setTimeout(() => setGenState("done"), 1400);
+    try {
+      const res = await fetch("/api/report", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: cur.name, motif: cur.motif, freqs: D.FREQS, right: D.RIGHT, left: D.LEFT }),
+      });
+      const data = res.ok ? await res.json() : null;
+      setReport(data && Array.isArray(data.paragraphs) && data.paragraphs.length ? data.paragraphs : fallback);
+    } catch {
+      setReport(fallback);
+    }
+    setGenState("done");
   }
   useEffect(() => {
-    if (genState === "done" && visibleParas < D.REPORT.length) {
+    if (genState === "done" && visibleParas < report.length) {
       const t = setTimeout(() => setVisibleParas((v) => v + 1), 240);
       return () => clearTimeout(t);
     }
-  }, [genState, visibleParas]);
+  }, [genState, visibleParas, report]);
   // audio playback (simulated)
   useEffect(() => {
     if (!playing) return;
@@ -793,7 +806,6 @@ export default function OptiqueOS() {
 
   // ════════════ PROFILE ════════════
   function renderProfile() {
-    const surname = cur.name.split(" ").slice(-1)[0];
     const t = tierOf(cur.tier);
     const prefs = D.PREFS[cur.id];
     const droits = D.DROITS[cur.id];
@@ -876,7 +888,7 @@ export default function OptiqueOS() {
               </div>
               {vis.add && vis.add !== "—" && <div style={{ textAlign: "center", marginTop: 12, fontSize: 13.5, color: T.text2 }}>Addition <b>{vis.add}</b></div>}
               <div style={{ background: "#f7f3ea", borderRadius: 13, padding: 16, marginTop: 14 }}>
-                <Tag label="Fable · vision" hex={T.gold} />
+                <Tag label="Symi · vision" hex={T.gold} />
                 <div style={{ fontSize: 13.5, lineHeight: 1.6, color: T.text2, marginTop: 8 }}>{cur.visionSignal || `Correction ${cur.rx}. Évolution à surveiller au prochain contrôle.`}</div>
               </div>
             </Card>
@@ -893,13 +905,12 @@ export default function OptiqueOS() {
                 {/* report generation */}
                 <div style={{ marginTop: 16, borderTop: `1px solid ${T.border}`, paddingTop: 16 }}>
                   <button onClick={generate} style={{ border: "none", borderRadius: 12, padding: "13px 20px", fontSize: 13.5, fontWeight: 600, cursor: genState === "loading" ? "wait" : "pointer", background: genState === "loading" ? "#ece5d6" : T.deep, color: genState === "loading" ? T.muted : T.canvas, minHeight: 46 }}>
-                    {genState === "loading" ? "Analyse du dossier…" : genState === "done" ? "Régénérer" : "Générer le compte rendu Fable"}
+                    {genState === "loading" ? "Rédaction du compte rendu…" : genState === "done" ? "Régénérer" : "Générer le compte rendu"}
                   </button>
                   <div style={{ marginTop: 14 }}>
-                    {D.REPORT.slice(0, visibleParas).map((p, i) => {
-                      const text = i === 0 ? "Bonjour Monsieur " + surname + "," : p;
-                      return <p key={i} style={{ fontSize: 14.5, lineHeight: 1.65, color: i === 0 ? T.ink : T.text2, fontWeight: i === 0 ? 600 : 400, margin: i === 0 ? 0 : "12px 0 0", animation: "oqFade .4s ease both" }}>{text}</p>;
-                    })}
+                    {report.slice(0, visibleParas).map((p, i) => (
+                      <p key={i} style={{ fontSize: 14.5, lineHeight: 1.65, color: i === 0 ? T.ink : T.text2, fontWeight: i === 0 ? 600 : 400, margin: i === 0 ? 0 : "12px 0 0", animation: "oqFade .4s ease both" }}>{p}</p>
+                    ))}
                   </div>
                 </div>
 
